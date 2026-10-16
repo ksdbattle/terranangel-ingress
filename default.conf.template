@@ -14,6 +14,18 @@ server {
     server_name _;
 
     # ---------------------------------------------------------------
+    # 探针：不依赖任何上游，专门用来判断「nginx 本身是否活着」
+    #   GET /healthz -> ingress-ok  ：nginx 正常，问题在上游（前端 Static Site）
+    #   GET /healthz -> 429 / 502   ：问题在 nginx 之前（实例休眠限流 / 容器没起来）
+    # 精确匹配（=）优先级最高，不会被 location / 抢走。
+    # ---------------------------------------------------------------
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ingress-ok\n";
+    }
+
+    # ---------------------------------------------------------------
     # 前端：透明反向代理到 Render Static Site
     #
     # 这里用 proxy_pass 而不是 return 302/301：
