@@ -1,0 +1,76 @@
+# Terranangel Ingress —— 流量入口（边缘反代）
+# 职责：把 terranangel.com 上的请求按路径分发到后端的各个 Render 服务。
+# 注意：TLS 由 Render 边缘终止，容器内只需跑明文 HTTP，所以这里不配 ssl_certificate。
+
+# WebSocket / SSE 透传所需（配合下面的 Upgrade / Connection 头）
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    # 必须监听 Render 注入的 $PORT，不能写 80
+    listen ${PORT};
+    server_name _;
+
+    # ---------------------------------------------------------------
+    # 前端：透明反向代理到 Render Static Site
+    #
+    # 这里用 proxy_pass 而不是 return 302/301：
+    # 跳转会把浏览器地址栏甩到 xxx.onrender.com，等于换了个源，
+    # 跨域问题原样保留；反代则全程停在 terranangel.com，天然同源。
+    # ---------------------------------------------------------------
+    location / {
+        proxy_pass https://terranangel-frontend.onrender.com;
+
+        # Render 靠 SNI + Host 决定路由到哪个站点，这两个不设会 404 或证书报错
+        proxy_ssl_server_name on;
+        proxy_set_header Host terranangel-frontend.onrender.com;
+
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # Render 免费实例 15 分钟无流量会休眠，冷启动约 1 分钟，
+        # 超时给太小会直接抛 504 而不是「慢慢转出来」
+        proxy_connect_timeout 15s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+
+    # ---------------------------------------------------------------
+    # 后端 API（等 Java 业务网关部署好之后启用）
+    #
+    # 形如 /api/<服务名>/xxx  ->  https://<服务名>.onrender.com/xxx
+    # 例如 /api/terranangel-gateway/user/info
+    #      -> https://terranangel-gateway.onrender.com/user/info
+    #
+    # 【注意】用变量做 proxy_pass 时必须配 resolver：nginx 不会在启动时解析，
+    # 而是运行时解析，缺 resolver 会报 "no resolver defined to resolve ..."。
+    # 启用时把下面整段取消注释即可。
+    # ---------------------------------------------------------------
+    # resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;
+    # resolver_timeout 5s;
+    #
+    # location ~ ^/api/(?<svc>[a-zA-Z0-9-]+)/(?<rest>.*)$ {
+    #     proxy_pass https://$svc.onrender.com/$rest$is_args$args;
+    #
+    #     proxy_ssl_server_name on;
+    #     proxy_set_header Host $svc.onrender.com;
+    #     proxy_set_header X-Real-IP $remote_addr;
+    #     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    #     proxy_set_header X-Forwarded-Proto $scheme;
+    #
+    #     proxy_http_version 1.1;
+    #     proxy_set_header Upgrade $http_upgrade;
+    #     proxy_set_header Connection $connection_upgrade;
+    #
+    #     proxy_connect_timeout 15s;
+    #     proxy_read_timeout 120s;
+    #     proxy_send_timeout 120s;
+    # }
+}
