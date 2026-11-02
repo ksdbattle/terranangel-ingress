@@ -73,6 +73,32 @@ server {
         proxy_connect_timeout 15s;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
+
+        # -----------------------------------------------------------
+        # 冷启动兜底：把上游的 502/503 换成「正在唤醒」页 + 自动刷新
+        #
+        # 为什么需要：nginx 转发出去的请求确实能唤醒上游，但 Render 在实例
+        # 启动期间会【立刻】回 502/503（不是挂住等 60 秒），所以只加超时没用，
+        # 用户看到的就是错误页。proxy_intercept_errors on 让 nginx 拦下这个
+        # 502，改用自己的页面，页面每 3 秒自刷新，等上游热了自然就进去了。
+        #
+        # 504 也一并拦截：上游真挂住时会先撞 proxy_read_timeout 再变 504。
+        # -----------------------------------------------------------
+        proxy_intercept_errors on;
+        error_page 502 503 504 = @waking_up;
+    }
+
+    # 「正在唤醒」占位页：纯 nginx return，不依赖任何上游，所以永远能出。
+    # 用 meta refresh 而不是 JS，任何浏览器/爬虫都认，且不会被内容安全策略挡。
+    #
+    # 副作用（已知并接受）：上游如果是真的挂了、不是休眠，这个页面会一直循环刷新。
+    # 区分办法：直接 curl 上游 https://terranangel-frontend.onrender.com/，
+    # 若持续 3 分钟以上仍是 502，那就是真故障而非冷启动。
+    location @waking_up {
+        default_type text/html;
+        # 别让浏览器/CDN 缓存这个中间态，否则唤醒完成后还停在占位页
+        add_header Cache-Control "no-store" always;
+        return 200 '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="3"><title>Starting up</title><style>html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;background:#0f1115;color:#e8e8ea;font:16px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;text-align:center;padding:24px}main{max-width:420px}h1{margin:0 0 10px;font-size:20px;font-weight:600}p{margin:0;opacity:.65;font-size:14px}</style></head><body><main><h1>Waking up the service</h1><p>The server was idle and is starting again. This page refreshes automatically, no action needed.</p></main></body></html>';
     }
 
     # ---------------------------------------------------------------
