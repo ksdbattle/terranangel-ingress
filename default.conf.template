@@ -10,7 +10,10 @@ map $http_upgrade $connection_upgrade {
 
 server {
     # 必须监听 Render 注入的 $PORT，不能写 80
-    listen ${PORT};
+    # default_server：多个 server 块共用同一端口时，未匹配 server_name 的请求
+    # 一律落到这里。不显式声明的话，nginx 会把「文件里第一个 server 块」当默认，
+    # 顺序一改流量就会跑错块，所以这里写死。
+    listen ${PORT} default_server;
     server_name _;
 
     # ---------------------------------------------------------------
@@ -130,4 +133,84 @@ server {
     #     proxy_read_timeout 120s;
     #     proxy_send_timeout 120s;
     # }
+}
+
+# ===================================================================
+# API 子域：api.terranangel.com  ->  https://terranangel-java.onrender.com/hello
+#
+# 前置条件（少做一条 nginx 就收不到请求，会停在 TLS 握手失败）：
+#   1) Render 的 terranangel-ingress 服务 → Custom Domains 里加上
+#      api.terranangel.com；千万不要勾 "redirects to"（那是 301，会把请求甩走）。
+#   2) 阿里云加解析：api  CNAME  terranangel-java.onrender.com
+#      （指 terranangel.com 也能到 Render 边缘，但多一跳 CNAME，没必要）。
+#
+# 为什么必须单独一个 server 块：主站那个块是 server_name _，会接住所有 Host，
+# 把 api 子域的请求也当成页面请求转给前端。区分靠的是 Host 头，不是 DNS。
+# ===================================================================
+server {
+    listen ${PORT};
+    server_name api.terranangel.com;
+
+    # resolver 不会跨 server 块继承，这里必须再声明一次
+    resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;
+    resolver_timeout 5s;
+
+    set $java_host terranangel-java.onrender.com;
+
+    location / {
+        # proxy_pass 带路径 = 用 /hello 替换掉整个原始 URI，
+        # 所以访问 /、/user/info、/api/x 全部变成 .../hello
+        # 想保留原始路径就去掉 /hello。（$is_args$args 保留查询串）
+        proxy_pass https://$java_host/hello$is_args$args;
+
+        # Render 靠 SNI + Host 路由，Host 必须是上游自己的主机名，
+        # 留着 api.terranangel.com 会 404
+        proxy_ssl_server_name on;
+        proxy_set_header Host $java_host;
+
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # 后端要判断「原始前端源」用这个；不要拿它做鉴权
+        proxy_set_header X-Forwarded-Host $host;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_connect_timeout 15s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+
+        # -----------------------------------------------------------
+        # CORS：api.terranangel.com 与 terranangel.com 不同源（同主域也算跨域），
+        # 浏览器一定会发预检。这里统一由 nginx 补头，Java 侧不用自己处理。
+        #
+        # 先 hide 掉上游可能自带的同名头，否则浏览器看到两个
+        # Access-Control-Allow-Origin 会直接判失败。
+        # -----------------------------------------------------------
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Credentials;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+
+        # always = 连 4xx/5xx 响应也带上，否则前端只能看到没有信息的 CORS 报错
+        add_header Access-Control-Allow-Origin "https://terranangel.com" always;
+        add_header Access-Control-Allow-Credentials "true" always;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-CSRF-Token" always;
+        add_header Access-Control-Max-Age "600" always;
+        add_header Vary "Origin" always;
+
+        # 预检请求（OPTIONS）直接 204，不转发给上游 —— 顺带省一次冷启动唤醒。
+        # 这里重复写一遍 add_header 是有意的：不依赖 if 块对 add_header 的继承行为。
+        if ($request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin "https://terranangel.com" always;
+            add_header Access-Control-Allow-Credentials "true" always;
+            add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, X-CSRF-Token" always;
+            add_header Access-Control-Max-Age "600" always;
+            return 204;
+        }
+    }
 }
