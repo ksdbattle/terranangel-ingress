@@ -14,6 +14,22 @@ server {
     server_name _;
 
     # ---------------------------------------------------------------
+    # 运行时 DNS 解析
+    #
+    # resolver 必须写在 server / http 层，不能只写在 location 里。
+    # 只有配合下面的「变量形式 proxy_pass」才有意义：
+    #   写死 proxy_pass https://host;  -> 启动时解析一次，IP 永久缓存
+    #   变量 proxy_pass https://$h;    -> 每个请求解析，按 valid 过期
+    # 上游服务销毁重建、边缘 IP 变更后，写死形式会一直连旧 IP（查不到原因
+    # 的 connect timeout / 502），只能重启 nginx；变量形式 30 秒内自愈。
+    # ---------------------------------------------------------------
+    resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;
+    resolver_timeout 5s;
+
+    # 前端上游主机名（供 location / 使用）
+    set $frontend_host terranangel-frontend.onrender.com;
+
+    # ---------------------------------------------------------------
     # 探针：不依赖任何上游，专门用来判断「nginx 本身是否活着」
     #   GET /healthz -> ingress-ok  ：nginx 正常，问题在上游（前端 Static Site）
     #   GET /healthz -> 429 / 502   ：问题在 nginx 之前（实例休眠限流 / 容器没起来）
@@ -31,13 +47,18 @@ server {
     # 这里用 proxy_pass 而不是 return 302/301：
     # 跳转会把浏览器地址栏甩到 xxx.onrender.com，等于换了个源，
     # 跨域问题原样保留；反代则全程停在 terranangel.com，天然同源。
+    #
+    # proxy_pass 用变量形式（配合上面的 resolver）以便运行时重新解析。
+    # 注意：变量后面不能跟 "/"，否则原始请求 URI 会被整个替换掉；
+    # 不跟路径时 nginx 原样透传客户端请求 URI，与写死主机名的行为一致。
     # ---------------------------------------------------------------
     location / {
-        proxy_pass https://terranangel-frontend.onrender.com;
+        proxy_pass https://$frontend_host;
 
         # Render 靠 SNI + Host 决定路由到哪个站点，这两个不设会 404 或证书报错
+        # 用变量后 Host 也必须显式给，nginx 不会自动用变量里的主机名
         proxy_ssl_server_name on;
-        proxy_set_header Host terranangel-frontend.onrender.com;
+        proxy_set_header Host $frontend_host;
 
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -63,11 +84,9 @@ server {
     #
     # 【注意】用变量做 proxy_pass 时必须配 resolver：nginx 不会在启动时解析，
     # 而是运行时解析，缺 resolver 会报 "no resolver defined to resolve ..."。
+    # resolver 已经在 server 层声明过（见文件开头），这里不用再写一遍。
     # 启用时把下面整段取消注释即可。
     # ---------------------------------------------------------------
-    # resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;
-    # resolver_timeout 5s;
-    #
     # location ~ ^/api/(?<svc>[a-zA-Z0-9-]+)/(?<rest>.*)$ {
     #     proxy_pass https://$svc.onrender.com/$rest$is_args$args;
     #
